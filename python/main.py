@@ -36,32 +36,69 @@ import argparse
 #########################################################################################
 crystal_color = np.array([255, 40, 40], dtype=np.uint8)
 
+# Face colors for --color-faces
+front_face_color = np.array([255, 255, 255, 255], dtype=np.uint8)  # white
+back_face_color = np.array([0, 0, 0, 255], dtype=np.uint8)  # black
+# side faces, named by the edge of the front face they are attached to.
+# For the PETSIRD generator geometry, edges 1-2 and 3-0 lie at z max / z min
+# (axial faces, red tones), edges 0-1 and 2-3 face the neighbouring crystals
+# in the ring (tangential faces, blue tones).
+side_face_colors = {
+    (1, 2): np.array([220, 0, 0, 255], dtype=np.uint8),  # red: +z (z max)
+    (3, 0): np.array([255, 100, 100, 255], dtype=np.uint8),  # light red: -z (z min)
+    (0, 1): np.array([0, 60, 220, 255], dtype=np.uint8),  # blue
+    (2, 3): np.array([130, 190, 255, 255], dtype=np.uint8),  # light blue
+}
+
 
 #########################################################################################
 # Methods
 #########################################################################################
 
 def create_box_from_vertices(vertices):
-    # Define faces using the indices of vertices that make up each face
+    # Define faces using the indices of vertices that make up each face.
+    # PETSIRD BoxShape: corners 0-3 = front face (towards scanner axis),
+    # corners 4-7 = back face; side faces are named by the front-face edge they
+    # are attached to. The +z/-z and ring-neighbour directions hold for the
+    # PETSIRD generator geometry (see side_face_colors).
     faces = [
-        [1, 0, 2],
-        [0, 2, 3],  # Bottom face
-        [4, 5, 6],
-        [4, 6, 7],  # Top face
+        [0, 1, 2],
+        [0, 2, 3],  # front face (corners 0-3, towards scanner axis)
+        [4, 6, 5],
+        [4, 7, 6],  # back face (corners 4-7, away from scanner axis)
         [0, 3, 7],
-        [0, 7, 4],  # Left face
-        [1, 2, 6],
-        [1, 6, 5],  # Right face
-        [0, 1, 5],
-        [0, 5, 4],  # Front face
+        [0, 7, 4],  # side at edge 3-0 (axial, -z) (bottom)
+        [1, 6, 2],
+        [1, 5, 6],  # side at edge 1-2 (axial, +z) (top)
+        [0, 5, 1],
+        [0, 4, 5],  # side at edge 0-1 (towards ring neighbour)
         [3, 2, 6],
-        [3, 6, 7],  # Back face
+        [3, 6, 7],  # side at edge 2-3 (towards other ring neighbour)
     ]
 
     # Create and return a Trimesh object
     box = trimesh.Trimesh(vertices=vertices, faces=faces)
 
     return box
+
+
+def set_face_colors(det_mesh):
+    """
+    Color the faces of a detecting element created by create_box_from_vertices():
+    PETSIRD front face (corners 0-3, the first 2 triangles) white,
+    PETSIRD back face (corners 4-7, the next 2 triangles) black,
+    side faces by the front-face edge they are attached to:
+    1-2 red (+z), 3-0 light red (-z), 0-1 blue, 2-3 light blue.
+    """
+    colors = np.zeros((len(det_mesh.faces), 4), dtype=np.uint8)
+    colors[0:2] = front_face_color  # front face (corners 0, 1, 2, 3)
+    colors[2:4] = back_face_color  # back face  (corners 4, 5, 6, 7)
+    colors[4:6] = side_face_colors[(3, 0)]  # side at edge 3-0 (corners 0, 3, 7, 4), -z
+    colors[6:8] = side_face_colors[(1, 2)]  # side at edge 1-2 (corners 1, 2, 6, 5), +z
+    colors[8:10] = side_face_colors[(0, 1)]  # side at edge 0-1 (corners 0, 1, 5, 4)
+    colors[10:12] = side_face_colors[(2, 3)]  # side at edge 2-3 (corners 3, 2, 6, 7)
+    det_mesh.visual.face_colors = colors
+    return det_mesh
 
 
 def extract_detector_eff(show_det_eff, header):
@@ -115,7 +152,7 @@ def set_module_color(
 
 
 def create_mesh(header, modules_only=False, show_det_eff=False, random_color=False, fov=None,
-                modules_indices=None):
+                modules_indices=None, color_faces=False):
     """
     Create 3D model of PET scanner defined in PETSIRD list mode file.
     """
@@ -152,8 +189,11 @@ def create_mesh(header, modules_only=False, show_det_eff=False, random_color=Fal
                 if not modules_only:
                     det_mesh = create_box_from_vertices(corners)
                             
-                    det_mesh = set_detector_color(det_mesh, detector_efficiencies, type_of_module, num_modules, mod_i, num_det_in_module, det_i, random_color)
-                            
+                    if color_faces:
+                        det_mesh = set_face_colors(det_mesh)
+                    else:
+                        det_mesh = set_detector_color(det_mesh, detector_efficiencies, type_of_module, num_modules, mod_i, num_det_in_module, det_i, random_color)
+
                     shapes.append(det_mesh)
                 else:
                     vertices.append(corners)
@@ -249,6 +289,16 @@ def parserCreator():
         required=False,
         help="Skip every xx modules",
     )
+    parser.add_argument(
+        "--color-faces",
+        action="store_true",
+        dest="color_faces",
+        default=False,
+        required=False,
+        help="Color the faces of each detecting element: front face (corners 0-3) white, "
+             "back face (corners 4-7) black, side faces by front-face edge: "
+             "red (edge 1-2, +z), light red (3-0, -z), blue (0-1), light blue (2-3)",
+    )
 
     return parser.parse_args()
 
@@ -269,7 +319,7 @@ if __name__ == "__main__":
         header = reader.read_header()
         module_indices = range(0, args.num_modules * (args.skip_modules + 1), args.skip_modules + 1) if args.num_modules > 0 else None
         mesh = create_mesh(header, args.modules_only, args.show_det_eff, args.random_color, args.fov,
-                          module_indices
+                          module_indices, args.color_faces
         )
         mesh.export(output_fname)
 
